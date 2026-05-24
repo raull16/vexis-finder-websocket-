@@ -4,8 +4,113 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 8080;
 const clients = new Map();
 
+// Your encryption keys (only server knows how to decode for logs)
+const WS_SECRET = "cabinetdoorpinkponyunicorn";
+const SALT = "VEXIS_ONLY_ADMINS";
+
+// Gibberish characters for outward appearance
+const GIBBERISH_CHARS = [
+    "Æ", "ß", "©", "®", "™", "€", "¥", "£", "§", "¶", 
+    "∆", "˚", "¬", "√", "∑", "≈", "¥", "Ω", "å", "∫",
+    "ç", "∂", "ƒ", "©", "˙", "ˆ", "ˇ", "˘", "≤", "≥",
+    "V", "E", "X", "I", "S", "7", "6", "!", "@", "#"
+];
+
+// ==================== DECRYPTION (For server logs only) ====================
+function generateKeyStream(length, seed_offset) {
+    let seed = 0;
+    for (let i = 0; i < WS_SECRET.length; i++) {
+        seed = (seed * 31 + WS_SECRET.charCodeAt(i)) % 2147483647;
+    }
+    seed = (seed + seed_offset) >>> 0;
+    
+    let a = seed, b = seed * 1664525 + 1013904223, c = seed * 1103515245 + 12345;
+    const stream = [];
+    for (let i = 0; i < length; i++) {
+        a = (a * 1664525 + 1013904223) >>> 0;
+        b = (b * 1103515245 + 12345) >>> 0;
+        c = (c * 134775813 + 1) >>> 0;
+        stream.push((a & 0xFF) ^ (b & 0xFF) ^ (c & 0xFF));
+    }
+    return stream;
+}
+
+function chaoticShuffle(data, forward) {
+    let bytes = [...data];
+    let seed = 0;
+    for (let i = 0; i < SALT.length; i++) {
+        seed = (seed * 31 + SALT.charCodeAt(i)) % 2147483647;
+    }
+    
+    const swaps = [];
+    for (let i = bytes.length - 1; i >= 1; i--) {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        const j = (seed % i) + 1;
+        swaps.push([i, j]);
+    }
+    
+    if (forward) {
+        for (const [i, j] of swaps) {
+            [bytes[i], bytes[j]] = [bytes[j], bytes[i]];
+        }
+    } else {
+        for (let k = swaps.length - 1; k >= 0; k--) {
+            const [i, j] = swaps[k];
+            [bytes[i], bytes[j]] = [bytes[j], bytes[i]];
+        }
+    }
+    return Buffer.from(bytes);
+}
+
+function tripleDecrypt(ciphertext) {
+    if (!ciphertext || ciphertext.length < 4) return null;
+    
+    try {
+        const timestamp = ciphertext.readUInt32LE(0);
+        const data = ciphertext.subarray(4);
+        
+        if (data.length === 0) return null;
+        
+        const stream3 = generateKeyStream(data.length, Math.floor(timestamp / 1000000));
+        const layer2_bytes = Buffer.alloc(data.length);
+        for (let i = 0; i < data.length; i++) {
+            layer2_bytes[i] = data[i] ^ stream3[i];
+        }
+        
+        const layer1 = chaoticShuffle(layer2_bytes, false);
+        
+        const stream1 = generateKeyStream(layer1.length, timestamp % 1000000);
+        const plaintext_bytes = Buffer.alloc(layer1.length);
+        for (let i = 0; i < layer1.length; i++) {
+            plaintext_bytes[i] = layer1[i] ^ stream1[i];
+        }
+        
+        return plaintext_bytes.toString('utf8');
+    } catch (err) {
+        return null;
+    }
+}
+
+// ==================== GIBBERISH ENCRYPTION (For clients) ====================
+function toGibberish(message) {
+    let result = [];
+    for (let i = 0; i < message.length; i++) {
+        const charCode = message.charCodeAt(i);
+        const gibIndex = (charCode + i) % GIBBERISH_CHARS.length;
+        result.push(GIBBERISH_CHARS[gibIndex]);
+        if (i % 5 === 0) {
+            result.push("Vexis");
+        } else if (i % 3 === 0) {
+            result.push("6767");
+        }
+    }
+    return result.join('');
+}
+
 const wss = new WebSocket.Server({ port: PORT });
 console.log(`WebSocket server running on port ${PORT}`);
+console.log(`🔒 Mode: Clients see gibberish only`);
+console.log(`📊 Mode: Server logs show decrypted data`);
 
 wss.on('connection', (ws, req) => {
     const clientId = crypto.randomBytes(8).toString('hex');
@@ -14,21 +119,36 @@ wss.on('connection', (ws, req) => {
 
     ws.on('message', async (data) => {
         try {
-            // Convert to string if needed
-            let message = data;
-            if (Buffer.isBuffer(data)) {
-                message = data.toString('utf8');
+            let buffer = data;
+            if (typeof data === 'string') {
+                buffer = Buffer.from(data);
             }
             
-            const payload = JSON.parse(message);
+            // Only the server can decrypt for logging
+            const decrypted = tripleDecrypt(buffer);
             
-            console.log(`[${clientId}] 📡 ${payload.name} | ${payload.money.toLocaleString()}/s | ${payload.players}/${payload.maxplayers} players | Job: ${payload.jobid}`);
-            
-            // Broadcast to all other clients
-            for (const [id, client] of clients) {
-                if (id !== clientId && client.readyState === WebSocket.OPEN) {
-                    client.send(message);
+            if (decrypted) {
+                try {
+                    const payload = JSON.parse(decrypted);
+                    // Show NORMAL readable logs on Render only
+                    console.log(`[${clientId}] 📡 ${payload.name} | ${payload.money.toLocaleString()}/s | ${payload.players}/${payload.maxplayers} players | Job: ${payload.jobid}`);
+                    
+                    // Convert to gibberish before sending to other clients
+                    const gibberish = toGibberish(decrypted);
+                    
+                    // Broadcast GIBBERISH to other clients (they can't read it)
+                    for (const [id, client] of clients) {
+                        if (id !== clientId && client.readyState === WebSocket.OPEN) {
+                            client.send(gibberish);
+                        }
+                    }
+                } catch (err) {
+                    console.log(`[${clientId}] Parse error:`, err.message);
                 }
+            } else {
+                // If not our encrypted format, just show as received
+                let msgPreview = buffer.toString('utf8').substring(0, 50);
+                console.log(`[${clientId}] 🔒 Received (Encrypted): ${msgPreview}...`);
             }
         } catch (err) {
             console.log(`[${clientId}] Error:`, err.message);
