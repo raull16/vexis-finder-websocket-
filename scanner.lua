@@ -1,5 +1,5 @@
 -- ╔══════════════════════════════════════════════════════════════════════════════╗
--- ║   VEXIS SCANNER  |  WS SYSTEM  |  INSANE ENCRYPTION v3.0                    ║
+-- ║   VEXIS SCANNER  |  AUTO-SERVER HOP  |  NO ENCRYPTION                       ║
 -- ║   Theme: Black & Yellow                                                     ║
 -- ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -8,117 +8,70 @@ print("=== VEXIS SCANNER STARTED ===")
 local HttpService = game:GetService("HttpService")
 local Workspace   = game:GetService("Workspace")
 local Players     = game:GetService("Players")
-local RunService  = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
 
 local WS_URL = "wss://vexisfinder-13jf.onrender.com"
 
--- ==================== INSANE ENCRYPTION v3 ====================
-local WS_SECRET = "cabinetdoorpinkponyunicorn"
-local SALT = "VEXIS_ONLY_ADMINS"
+-- ==================== CONFIGURATION ====================
+local MIN_GEN                     = 10000000  -- 10M minimum to report
+local SCAN_INTERVAL               = 2         -- seconds between scans
+local VALUE_IMPROVEMENT_THRESHOLD = 10000000  -- 10M improvement to resend
+local SCAN_TIMEOUT                = 60        -- seconds to scan before hopping
+local EMPTY_SERVER_TIMEOUT        = 30        -- seconds with 0 pets = hop
+local HOOP_COOLDOWN               = 3         -- seconds between hops
 
--- Multi-layer XOR + AES-like substitution
-local function generateKeyStream(length, seed_offset)
-    local stream = {}
-    local seed = 0
-    for i = 1, #WS_SECRET do
-        seed = (seed * 31 + string.byte(WS_SECRET, i)) % 2147483647
-    end
-    seed = (seed + seed_offset) % 4294967296
+-- ==================== BLACKLIST SYSTEM ====================
+local blacklistedJobs = {}
+local blacklistFile = "vexis_blacklist.json"
+
+local function loadBlacklist()
+    local success, data = pcall(function()
+        return readfile(blacklistFile)
+    end)
     
-    local a, b, c = seed, seed * 1664525 + 1013904223, seed * 1103515245 + 12345
-    for i = 1, length do
-        a = (a * 1664525 + 1013904223) % 4294967296
-        b = (b * 1103515245 + 12345) % 4294967296
-        c = (c * 134775813 + 1) % 4294967296
-        local val = bit32.bxor(a % 256, b % 256, c % 256)
-        table.insert(stream, val)
+    if success and data then
+        local decoded = HttpService:JSONDecode(data)
+        if decoded and type(decoded) == "table" then
+            blacklistedJobs = decoded
+            print(string.format("[BLACKLIST] Loaded %d blacklisted servers", #blacklistedJobs))
+        end
+    else
+        print("[BLACKLIST] No existing blacklist found, creating new one")
+        blacklistedJobs = {}
     end
-    return stream
 end
 
-local function chaoticShuffle(data)
-    local bytes = {}
-    for i = 1, #data do bytes[i] = string.byte(data, i) end
-    local seed = 0
-    for i = 1, #SALT do seed = (seed * 31 + string.byte(SALT, i)) % 2147483647 end
-    for i = #bytes, 2, -1 do
-        seed = (seed * 1664525 + 1013904223) % 4294967296
-        local j = (seed % i) + 1
-        bytes[i], bytes[j] = bytes[j], bytes[i]
-    end
-    return string.char(table.unpack(bytes))
+local function saveBlacklist()
+    local json = HttpService:JSONEncode(blacklistedJobs)
+    pcall(function()
+        writefile(blacklistFile, json)
+    end)
+    print(string.format("[BLACKLIST] Saved %d blacklisted servers", #blacklistedJobs))
 end
 
-local function reverseShuffle(data)
-    local bytes = {}
-    for i = 1, #data do bytes[i] = string.byte(data, i) end
-    local seed = 0
-    for i = 1, #SALT do seed = (seed * 31 + string.byte(SALT, i)) % 2147483647 end
-    local swaps = {}
-    for i = #bytes, 2, -1 do
-        seed = (seed * 1664525 + 1013904223) % 4294967296
-        local j = (seed % i) + 1
-        table.insert(swaps, {i, j})
+local function addToBlacklist(jobId)
+    if not jobId or jobId == "" then return end
+    
+    for _, id in ipairs(blacklistedJobs) do
+        if id == jobId then return end
     end
-    for k = #swaps, 1, -1 do
-        local i, j = swaps[k][1], swaps[k][2]
-        bytes[i], bytes[j] = bytes[j], bytes[i]
-    end
-    return string.char(table.unpack(bytes))
+    
+    table.insert(blacklistedJobs, jobId)
+    saveBlacklist()
+    print(string.format("[BLACKLIST] Added %s", jobId))
 end
 
-local function tripleEncrypt(plaintext)
-    local timestamp = os.time()
-    local ts_bytes = string.pack("I4", timestamp)
-    -- Layer 1: XOR with timestamp-based key
-    local stream1 = generateKeyStream(#plaintext, timestamp % 1000000)
-    local layer1 = {}
-    for i = 1, #plaintext do
-        layer1[i] = bit32.bxor(string.byte(plaintext, i), stream1[i])
+local function isBlacklisted(jobId)
+    for _, id in ipairs(blacklistedJobs) do
+        if id == jobId then return true end
     end
-    layer1 = string.char(table.unpack(layer1))
-    -- Layer 2: Chaotic shuffle
-    local layer2 = chaoticShuffle(layer1)
-    -- Layer 3: XOR with secondary key stream
-    local stream3 = generateKeyStream(#layer2, timestamp // 1000000)
-    local layer3 = {}
-    for i = 1, #layer2 do
-        layer3[i] = bit32.bxor(string.byte(layer2, i), stream3[i])
-    end
-    layer3 = string.char(table.unpack(layer3))
-    -- Add timestamp header
-    return ts_bytes .. layer3
-end
-
-local function signMessage(ts, jobId)
-    local raw = WS_SECRET .. tostring(ts) .. tostring(jobId)
-    local h   = 5381
-    for i = 1, #raw do
-        h = (h * 33 + string.byte(raw, i)) % 2147483647
-    end
-    local h2 = 52711
-    for i = #raw, 1, -1 do
-        h2 = (h2 * 31 + string.byte(raw, i)) % 2147483647
-    end
-    return string.format("%x%x", h, h2)
+    return false
 end
 
 -- ==================== WEBHOOKS ====================
 local PEAK_WEBHOOK  = "https://discord.com/api/webhooks/1494112447991251006/A2UTkmd26_YwvPBZ6D29cme8jIWlVpsHKPqP-6vJeEgidIBHOTufXrXqNjs6pOuavxGx"
 local HIGHLIGHT_WEBHOOK = "https://discord.com/api/webhooks/1494112540001697964/dCs_yovsxBeGOarO7JlzNCATsA7C36XPTotjlkZ32qhvlGzWC5Cimk4w_z1LnhGBMNUq"
 local LOW_WEBHOOK = "https://discord.com/api/webhooks/1494112632733437952/BWhEDEjPH5Hnzcob41pLWHuiJ2a7HOrH9ilDENxUXTX5dLtccLppeprHoAqbz7xhAGsy"
-
-local MIN_GEN                     = 10000000
-local SCAN_INTERVAL               = 2
-local VALUE_IMPROVEMENT_THRESHOLD = 10000000
-
-local ws                   = nil
-local scanCount            = 0
-local discordSentForServer = false
-local highestValueSeen     = 0
-local lastDiscordSend      = 0
-local discordCooldown      = 12
-local isDuelCooldown       = false
 
 -- ==================== NAME CLEANING ====================
 local function cleanRichText(name)
@@ -136,7 +89,6 @@ local function normalizeName(name)
 end
 
 -- ==================== VIP / TIER ROUTING ====================
-
 local VIP_ALWAYS_PEAK = {
     ["Hydra Dragon Cannelloni"] = true,
     ["Dragon Cannelloni"]       = true,
@@ -289,34 +241,6 @@ local function isDuelBrainrot(obj)
     return false
 end
 
-local function updateDuelStatus()
-    local wasDuel  = isDuelCooldown
-    isDuelCooldown = false
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player:GetAttribute("__duels_block_steal") == true then
-            isDuelCooldown = true
-            break
-        end
-    end
-    if isDuelCooldown and not wasDuel     then print("[Status] ⚔️ Duel cooldown ACTIVE")
-    elseif not isDuelCooldown and wasDuel then print("[Status] 💰 Duel cooldown ended") end
-end
-
--- ==================== PERFORMANCE ====================
-spawn(function()
-    print("[PERF] Disabling textures...")
-    if not game:IsLoaded() then game.Loaded:Wait() end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        pcall(function()
-            if obj:IsA("Texture") or obj:IsA("SurfaceAppearance") then
-                obj.Transparency = 1
-                obj.Enabled      = false
-            end
-        end)
-    end
-    print("[PERF] Textures disabled")
-end)
-
 -- ==================== HELPERS ====================
 local function parseGen(text)
     if not text then return 0 end
@@ -408,16 +332,23 @@ local function getImageUrl(petName)
 end
 
 -- ==================== WEBSOCKET ====================
+local ws = nil
+local wsConnected = false
+
 local function connectWS()
     while true do
         print("[WS] Connecting...")
         local success, result = pcall(function() return WebSocket.connect(WS_URL) end)
         if success and result then
             ws = result
+            wsConnected = true
             print("[WS] ✅ Connected!")
             ws.OnClose:Connect(function()
                 print("[WS] Connection closed. Reconnecting...")
+                wsConnected = false
                 ws = nil
+                task.wait(5)
+                connectWS()
             end)
             break
         else
@@ -426,19 +357,14 @@ local function connectWS()
         end
     end
 end
-spawn(connectWS)
 
 local function sendToWS(best)
-    if not ws then return end
+    if not ws or not wsConnected then return end
     local jobId = game.JobId
     if jobId == "" then return end
-    local shouldSend = (highestValueSeen == 0) or (best.genValue > highestValueSeen + VALUE_IMPROVEMENT_THRESHOLD)
-    if not shouldSend then return end
-
-    local emoji       = (isDuelCooldown or best.isDuel) and "⚔️" or "💰"
+    
+    local emoji       = best.isDuel and "⚔️" or "💰"
     local displayName = emoji .. " " .. normalizeName(best.name)
-    local ts          = os.time()
-    local sig         = signMessage(ts, jobId)
 
     local payload = {
         jobid      = jobId,
@@ -446,22 +372,22 @@ local function sendToWS(best)
         name       = displayName,
         players    = #Players:GetPlayers(),
         maxplayers = Players.MaxPlayers,
-        ts         = ts,
-        sig        = sig,
     }
 
-    local json      = HttpService:JSONEncode(payload)
-    local encrypted = tripleEncrypt(json)
+    local json = HttpService:JSONEncode(payload)
 
     pcall(function()
-        ws:Send(encrypted)
+        ws:Send(json)
         print(string.format("[WS] SENT → %s | %s/s", displayName, formatNumber(best.genValue)))
     end)
-
-    highestValueSeen = best.genValue
 end
 
 -- ==================== DISCORD ====================
+local discordSentForServer = false
+local lastDiscordSend = 0
+local discordCooldown = 12
+local highestValueSeen = 0
+
 local function sendToDiscord(foundList, bestInfo)
     if #foundList == 0 then return end
     local now = tick()
@@ -474,18 +400,15 @@ local function sendToDiscord(foundList, bestInfo)
     if tier == "peak" then
         webhookUrl = PEAK_WEBHOOK
         tierName = "PEAK"
-        print("[Discord] PEAK webhook")
     elseif tier == "highlight" then
         webhookUrl = HIGHLIGHT_WEBHOOK
         tierName = "HIGHLIGHT"
-        print("[Discord] HIGHLIGHT webhook")
     else
         webhookUrl = LOW_WEBHOOK
         tierName = "LOW"
-        print("[Discord] LOW webhook")
     end
 
-    local groups     = {}
+    local groups = {}
     local groupOrder = {}
     for _, info in ipairs(foundList) do
         local cleanName = normalizeName(info.name)
@@ -516,7 +439,7 @@ local function sendToDiscord(foundList, bestInfo)
     end
     table.sort(aggregated, function(a, b) return a.maxGen > b.maxGen end)
 
-    local effectiveDuel = isDuelCooldown or bestInfo.isDuel
+    local effectiveDuel = bestInfo.isDuel
     local footerEmoji   = effectiveDuel and "⚔️" or "💰"
     local best          = aggregated[1]
 
@@ -573,45 +496,91 @@ local function sendToDiscord(foundList, bestInfo)
                 Headers = { ["Content-Type"] = "application/json" },
                 Body    = json,
             })
-            print("[Discord] ✅ Sent | "
-                .. formatNumber(bestInfo.genValue)
-                .. " | tier=" .. tier
-                .. (pingEveryone and " | @everyone" or ""))
+            print("[Discord] ✅ Sent | " .. formatNumber(bestInfo.genValue) .. " | tier=" .. tier)
             discordSentForServer = true
             lastDiscordSend      = now
         end)
     end
 end
 
--- ==================== MAIN LOOP ====================
+-- ==================== SERVER HOPPING ====================
+local currentServerStartTime = os.time()
+local lastEmptyTime = nil
+local isHopping = false
+
+local function hopToNewServer()
+    if isHopping then return end
+    isHopping = true
+    
+    local currentJobId = game.JobId
+    print(string.format("[HOP] Leaving server %s", currentJobId))
+    
+    addToBlacklist(currentJobId)
+    
+    local placeId = game.PlaceId
+    
+    task.wait(HOOP_COOLDOWN)
+    TeleportService:Teleport(placeId)
+end
+
+-- ==================== MAIN SCANNER LOOP ====================
+loadBlacklist()
+spawn(connectWS)
+
+local currentJobId = game.JobId
+if isBlacklisted(currentJobId) then
+    print(string.format("[BLACKLIST] Current server %s is blacklisted! Hopping immediately...", currentJobId))
+    task.wait(1)
+    hopToNewServer()
+    return
+else
+    print(string.format("[INFO] Scanning server: %s", currentJobId))
+end
+
 print("[Scanner] Main loop started")
 
 while true do
     task.wait(SCAN_INTERVAL)
-    scanCount += 1
-    print(string.format("[Scan #%d]", scanCount))
-    updateDuelStatus()
-
+    
+    local scanTime = os.time() - currentServerStartTime
+    
+    if scanTime >= SCAN_TIMEOUT then
+        print(string.format("[HOP] Scan timeout reached (%d seconds), hopping...", SCAN_TIMEOUT))
+        hopToNewServer()
+        break
+    end
+    
     local found = scanDebris()
-    if #found > 0 then
+    
+    if #found == 0 then
+        if not lastEmptyTime then
+            lastEmptyTime = os.time()
+            print("[SCAN] No pets found, starting empty server timer...")
+        elseif os.time() - lastEmptyTime >= EMPTY_SERVER_TIMEOUT then
+            print(string.format("[HOP] No pets found for %d seconds, hopping...", EMPTY_SERVER_TIMEOUT))
+            hopToNewServer()
+            break
+        end
+    else
+        lastEmptyTime = nil
+        
         local best = found[1]
         for _, info in ipairs(found) do
             if info.genValue > best.genValue then best = info end
         end
 
-        local effectiveDuel = isDuelCooldown or best.isDuel
-        local emoji         = effectiveDuel and "⚔️" or "💰"
-
+        local emoji = best.isDuel and "⚔️" or "💰"
         print(string.format("   → Found %d brainrot(s) | %s %s (%s/s) %s",
             #found, emoji, normalizeName(best.name),
-            formatNumber(best.genValue), effectiveDuel and "[DUEL]" or ""))
+            formatNumber(best.genValue), best.isDuel and "[DUEL]" or ""))
 
         sendToWS(best)
 
         if not discordSentForServer or best.genValue >= highestValueSeen + VALUE_IMPROVEMENT_THRESHOLD then
             sendToDiscord(found, best)
+            if best.genValue > highestValueSeen then
+                highestValueSeen = best.genValue
+            end
         end
-    else
-        print("   → No high-value brainrot found")
     end
 end
