@@ -1,5 +1,4 @@
 const WebSocket = require('ws');
-const crypto = require('crypto');
 
 const PORT = process.env.PORT || 8080;
 
@@ -99,9 +98,9 @@ const wss = new WebSocket.Server({ port: PORT });
 console.log(`WebSocket server running on port ${PORT}`);
 
 wss.on('connection', (ws, req) => {
-    const clientId = crypto.randomBytes(8).toString('hex');
+    const clientId = require('crypto').randomBytes(8).toString('hex');
     clients.set(clientId, ws);
-    console.log(`[${clientId}] Client connected`);
+    console.log(`[${clientId}] Client connected from ${req.socket.remoteAddress}`);
 
     ws.on('message', async (data) => {
         try {
@@ -118,7 +117,7 @@ wss.on('connection', (ws, req) => {
                 return;
             }
             
-            console.log(`[${clientId}] ${payload.name} | ${payload.money}/s | ${payload.players}/${payload.maxplayers} players`);
+            console.log(`[${clientId}] 📡 ${payload.name} | ${payload.money.toLocaleString()}/s | ${payload.players}/${payload.maxplayers} players`);
             
             // Broadcast to all other clients
             for (const [id, client] of clients) {
@@ -134,5 +133,9 @@ wss.on('connection', (ws, req) => {
     ws.on('close', () => {
         clients.delete(clientId);
         console.log(`[${clientId}] Client disconnected | ${clients.size} remaining`);
+    });
+    
+    ws.on('error', (err) => {
+        console.log(`[${clientId}] Error:`, err.message);
     });
 });
