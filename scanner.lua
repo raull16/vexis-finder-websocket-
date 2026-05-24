@@ -10,7 +10,7 @@ local Workspace   = game:GetService("Workspace")
 local Players     = game:GetService("Players")
 local RunService  = game:GetService("RunService")
 
-local WS_URL = "wss://vexisfinder.up.railway.app"
+local WS_URL = "wss://vexisfinder-13jf.onrender.com"
 
 -- ==================== INSANE ENCRYPTION v3 ====================
 local WS_SECRET = "cabinetdoorpinkponyunicorn"
