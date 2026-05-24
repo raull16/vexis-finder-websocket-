@@ -1,6 +1,5 @@
 -- ╔══════════════════════════════════════════════════════════════════════════════╗
--- ║   VEXIS SCANNER  |  AUTO-SERVER HOP  |  NO ENCRYPTION                       ║
--- ║   Theme: Black & Yellow                                                     ║
+-- ║   VEXIS SCANNER  |  STRONG ENCRYPTION  |  AUTO-SERVER HOP                   ║
 -- ╚══════════════════════════════════════════════════════════════════════════════╝
 
 print("=== VEXIS SCANNER STARTED ===")
@@ -13,12 +12,67 @@ local TeleportService = game:GetService("TeleportService")
 local WS_URL = "wss://vexisfinder-13jf.onrender.com"
 
 -- ==================== CONFIGURATION ====================
-local MIN_GEN                     = 10000000  -- 10M minimum to report
-local SCAN_INTERVAL               = 2         -- seconds between scans
-local VALUE_IMPROVEMENT_THRESHOLD = 10000000  -- 10M improvement to resend
-local SCAN_TIMEOUT                = 60        -- seconds to scan before hopping
-local EMPTY_SERVER_TIMEOUT        = 30        -- seconds with 0 pets = hop
-local HOOP_COOLDOWN               = 3         -- seconds between hops
+local MIN_GEN                     = 10000000
+local SCAN_INTERVAL               = 2
+local VALUE_IMPROVEMENT_THRESHOLD = 10000000
+local SCAN_TIMEOUT                = 60
+local EMPTY_SERVER_TIMEOUT        = 30
+local HOOP_COOLDOWN               = 3
+
+-- ==================== STRONG ENCRYPTION ====================
+local WS_SECRET = "cabinetdoorpinkponyunicorn"
+local SALT = "VEXIS_ONLY_ADMINS"
+
+local function generateKeyStream(length, seed_offset)
+    local stream = {}
+    local seed = 0
+    for i = 1, #WS_SECRET do
+        seed = (seed * 31 + string.byte(WS_SECRET, i)) % 2147483647
+    end
+    seed = (seed + seed_offset) % 4294967296
+    
+    local a, b, c = seed, seed * 1664525 + 1013904223, seed * 1103515245 + 12345
+    for i = 1, length do
+        a = (a * 1664525 + 1013904223) % 4294967296
+        b = (b * 1103515245 + 12345) % 4294967296
+        c = (c * 134775813 + 1) % 4294967296
+        local val = bit32.bxor(a % 256, b % 256, c % 256)
+        table.insert(stream, val)
+    end
+    return stream
+end
+
+local function chaoticShuffle(data)
+    local bytes = {}
+    for i = 1, #data do bytes[i] = string.byte(data, i) end
+    local seed = 0
+    for i = 1, #SALT do seed = (seed * 31 + string.byte(SALT, i)) % 2147483647 end
+    for i = #bytes, 2, -1 do
+        seed = (seed * 1664525 + 1013904223) % 4294967296
+        local j = (seed % i) + 1
+        bytes[i], bytes[j] = bytes[j], bytes[i]
+    end
+    return string.char(table.unpack(bytes))
+end
+
+local function tripleEncrypt(plaintext)
+    local timestamp = os.time()
+    local ts_bytes = string.pack("I4", timestamp)
+    local stream1 = generateKeyStream(#plaintext, timestamp % 1000000)
+    local layer1 = {}
+    for i = 1, #plaintext do
+        layer1[i] = bit32.bxor(string.byte(plaintext, i), stream1[i])
+    end
+    layer1 = string.char(table.unpack(layer1))
+    local layer2 = chaoticShuffle(layer1)
+    local stream3 = generateKeyStream(#layer2, timestamp // 1000000)
+    local layer3 = {}
+    for i = 1, #layer2 do
+        layer3[i] = bit32.bxor(string.byte(layer2, i), stream3[i])
+    end
+    layer3 = string.char(table.unpack(layer3))
+    return ts_bytes .. layer3
+end
 
 -- ==================== BLACKLIST SYSTEM ====================
 local blacklistedJobs = {}
@@ -68,6 +122,23 @@ local function isBlacklisted(jobId)
     return false
 end
 
+-- ==================== SKIP OWN BASE ====================
+local function isOwnBrainrot(obj)
+    local localPlayer = Players.LocalPlayer
+    if not localPlayer then return false end
+    
+    local overhead = obj:FindFirstChild("AnimalOverhead")
+    if overhead then
+        local nameLabel = overhead:FindFirstChild("DisplayName")
+        if nameLabel and nameLabel.Text then
+            if nameLabel.Text == localPlayer.Name then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- ==================== WEBHOOKS ====================
 local PEAK_WEBHOOK  = "https://discord.com/api/webhooks/1494112447991251006/A2UTkmd26_YwvPBZ6D29cme8jIWlVpsHKPqP-6vJeEgidIBHOTufXrXqNjs6pOuavxGx"
 local HIGHLIGHT_WEBHOOK = "https://discord.com/api/webhooks/1494112540001697964/dCs_yovsxBeGOarO7JlzNCATsA7C36XPTotjlkZ32qhvlGzWC5Cimk4w_z1LnhGBMNUq"
@@ -88,7 +159,7 @@ local function normalizeName(name)
     return name
 end
 
--- ==================== VIP / TIER ROUTING ====================
+-- ==================== TIER ROUTING ====================
 local VIP_ALWAYS_PEAK = {
     ["Hydra Dragon Cannelloni"] = true,
     ["Dragon Cannelloni"]       = true,
@@ -172,7 +243,7 @@ local HIGHLIGHT_THRESHOLDS = {
     ["Fortunu Cashuru"]       = 130e6,
     ["Lovin Rose"]            = 300e6,
     ["Cash or Card"]          = 100e6,
-    ["Celularcini Viciosini"]  = 435e6,
+    ["Celularcini Viciosini"] = 435e6,
     ["Cloverat Clapat"]       = 60e6,
     ["Goblino Uniciclino"]    = 27.5e6,
     ["Jolly Jolly Sahur"]     = 462e6,
@@ -185,7 +256,7 @@ local HIGHLIGHT_THRESHOLDS = {
 }
 
 local function getWebhookTier(brainrotName, genValue)
-    local name      = normalizeName(brainrotName)
+    local name = normalizeName(brainrotName)
     local nameLower = name:lower()
 
     for nocapName in pairs(NO_CAP_BRAINROTS) do
@@ -213,9 +284,9 @@ local function getWebhookTier(brainrotName, genValue)
         end
     end
 
-    if genValue >= 500e6     then return "peak", false
+    if genValue >= 500e6 then return "peak", false
     elseif genValue >= 100e6 then return "highlight", false
-    else                          return "low", false end
+    else return "low", false end
 end
 
 -- ==================== DUEL CHECK ====================
@@ -245,7 +316,7 @@ end
 local function parseGen(text)
     if not text then return 0 end
     text = text:gsub("[^%d%.KMBTkmbt]", ""):lower()
-    local num    = tonumber(text:match("%d+%.?%d*")) or 0
+    local num = tonumber(text:match("%d+%.?%d*")) or 0
     local suffix = text:match("[kmbt]") or ""
     if suffix == "k" then num *= 1e3
     elseif suffix == "m" then num *= 1e6
@@ -255,9 +326,9 @@ local function parseGen(text)
 end
 
 local function formatNumber(n)
-    if n >= 1e12      then return string.format("%.2fT", n/1e12)
-    elseif n >= 1e9   then return string.format("%.2fB", n/1e9)
-    elseif n >= 1e6   then return string.format("%.2fM", n/1e6)
+    if n >= 1e12 then return string.format("%.2fT", n/1e12)
+    elseif n >= 1e9 then return string.format("%.2fB", n/1e9)
+    elseif n >= 1e6 then return string.format("%.2fM", n/1e6)
     else
         local s = tostring(math.floor(n))
         return s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
@@ -266,6 +337,10 @@ end
 
 -- ==================== BRAINROT INFO ====================
 local function getBrainrotInfo(obj)
+    if isOwnBrainrot(obj) then
+        return nil
+    end
+    
     local overhead = obj:FindFirstChild("AnimalOverhead")
     if not overhead then return nil end
     local genLabel = overhead:FindFirstChild("Generation")
@@ -273,9 +348,9 @@ local function getBrainrotInfo(obj)
     local genValue = parseGen(genLabel.Text)
     if genValue <= MIN_GEN then return nil end
 
-    local nameLabel     = overhead:FindFirstChild("DisplayName")
+    local nameLabel = overhead:FindFirstChild("DisplayName")
     local mutationLabel = overhead:FindFirstChild("Mutation")
-    local imageAssetId  = nil
+    local imageAssetId = nil
 
     for _, child in ipairs(overhead:GetChildren()) do
         if child:IsA("ImageLabel") then
@@ -285,12 +360,12 @@ local function getBrainrotInfo(obj)
     end
 
     return {
-        name         = cleanRichText(nameLabel and nameLabel.Text or obj.Name),
-        genValue     = genValue,
-        mutation     = cleanRichText(mutationLabel and mutationLabel.Text or "None"),
+        name = cleanRichText(nameLabel and nameLabel.Text or obj.Name),
+        genValue = genValue,
+        mutation = cleanRichText(mutationLabel and mutationLabel.Text or "None"),
         imageAssetId = imageAssetId,
-        isDuel       = isDuelBrainrot(obj),
-        obj          = obj,
+        isDuel = isDuelBrainrot(obj),
+        obj = obj,
     }
 end
 
@@ -298,19 +373,32 @@ local function scanDebris()
     local debris = Workspace:FindFirstChild("Debris")
     if not debris then return {} end
     local found = {}
+    local skippedOwn = 0
+    
     for _, obj in ipairs(debris:GetChildren()) do
-        local info = getBrainrotInfo(obj)
-        if info then table.insert(found, info) end
+        if isOwnBrainrot(obj) then
+            skippedOwn = skippedOwn + 1
+        else
+            local info = getBrainrotInfo(obj)
+            if info then 
+                table.insert(found, info)
+            end
+        end
     end
+    
+    if skippedOwn > 0 then
+        print(string.format("[SCAN] Skipped %d of your own brainrot(s)", skippedOwn))
+    end
+    
     return found
 end
 
 -- ==================== IMAGE FETCH ====================
 local function getImageUrl(petName)
     local success, result = pcall(function()
-        local title  = petName:gsub(" ", "_")
+        local title = petName:gsub(" ", "_")
         local apiUrl = "https://stealabrainrot.fandom.com/api.php?action=query&prop=pageimages&format=json&piprop=thumbnail&pithumbsize=500&titles=" .. title
-        local req    = request or http_request or (syn and syn.request)
+        local req = request or http_request or (syn and syn.request)
         local response
         if req then
             response = req({Url = apiUrl, Method = "GET"})
@@ -342,7 +430,7 @@ local function connectWS()
         if success and result then
             ws = result
             wsConnected = true
-            print("[WS] ✅ Connected!")
+            print("[WS] ✅ Connected! (Encrypted Mode)")
             ws.OnClose:Connect(function()
                 print("[WS] Connection closed. Reconnecting...")
                 wsConnected = false
@@ -363,22 +451,23 @@ local function sendToWS(best)
     local jobId = game.JobId
     if jobId == "" then return end
     
-    local emoji       = best.isDuel and "⚔️" or "💰"
+    local emoji = best.isDuel and "⚔️" or "💰"
     local displayName = emoji .. " " .. normalizeName(best.name)
 
     local payload = {
-        jobid      = jobId,
-        money      = best.genValue,
-        name       = displayName,
-        players    = #Players:GetPlayers(),
+        jobid = jobId,
+        money = best.genValue,
+        name = displayName,
+        players = #Players:GetPlayers(),
         maxplayers = Players.MaxPlayers,
     }
 
     local json = HttpService:JSONEncode(payload)
+    local encrypted = tripleEncrypt(json)
 
     pcall(function()
-        ws:Send(json)
-        print(string.format("[WS] SENT → %s | %s/s", displayName, formatNumber(best.genValue)))
+        ws:Send(encrypted)
+        print(string.format("[WS] SENT → 🔒 %s | %s/s", displayName, formatNumber(best.genValue)))
     end)
 end
 
@@ -412,14 +501,14 @@ local function sendToDiscord(foundList, bestInfo)
     local groupOrder = {}
     for _, info in ipairs(foundList) do
         local cleanName = normalizeName(info.name)
-        local cleanMut  = info.mutation ~= "None" and cleanRichText(info.mutation) or "None"
+        local cleanMut = info.mutation ~= "None" and cleanRichText(info.mutation) or "None"
         local key = cleanName .. "|" .. cleanMut
         if not groups[key] then
             groups[key] = {
-                name         = cleanName,
-                mutation     = cleanMut,
-                count        = 0,
-                maxGen       = 0,
+                name = cleanName,
+                mutation = cleanMut,
+                count = 0,
+                maxGen = 0,
                 imageAssetId = info.imageAssetId,
             }
             table.insert(groupOrder, key)
@@ -439,9 +528,8 @@ local function sendToDiscord(foundList, bestInfo)
     end
     table.sort(aggregated, function(a, b) return a.maxGen > b.maxGen end)
 
-    local effectiveDuel = bestInfo.isDuel
-    local footerEmoji   = effectiveDuel and "⚔️" or "💰"
-    local best          = aggregated[1]
+    local footerEmoji = bestInfo.isDuel and "⚔️" or "💰"
+    local best = aggregated[1]
 
     local bestMutDisplay = best.mutation ~= "None" and "[" .. best.mutation .. "] " or ""
     local descLines = {
@@ -451,11 +539,9 @@ local function sendToDiscord(foundList, bestInfo)
     if #aggregated > 1 then
         local otherLines = {}
         for i = 2, #aggregated do
-            local g   = aggregated[i]
+            local g = aggregated[i]
             local mut = g.mutation ~= "None" and "[" .. g.mutation .. "] " or ""
-            table.insert(otherLines,
-                string.format("%dx %s%s ($%s/s)", g.count, mut, g.name, formatNumber(g.maxGen))
-            )
+            table.insert(otherLines, string.format("%dx %s%s ($%s/s)", g.count, mut, g.name, formatNumber(g.maxGen)))
         end
         table.insert(descLines, "\n**Others**")
         table.insert(descLines, "```\n" .. table.concat(otherLines, "\n") .. "\n```")
@@ -468,8 +554,7 @@ local function sendToDiscord(foundList, bestInfo)
 
     local thumbnailUrl = nil
     if best.imageAssetId then
-        thumbnailUrl = "https://www.roblox.com/asset-thumbnail/image?assetId="
-            .. best.imageAssetId .. "&width=420&height=420&format=png"
+        thumbnailUrl = "https://www.roblox.com/asset-thumbnail/image?assetId=" .. best.imageAssetId .. "&width=420&height=420&format=png"
     else
         thumbnailUrl = getImageUrl(best.name)
     end
@@ -477,28 +562,28 @@ local function sendToDiscord(foundList, bestInfo)
     local footerText = "discord.gg/vexis •" .. footerEmoji .. " • " .. tierName
 
     local embed = {
-        title       = "Vexis Finder | " .. tierName,
+        title = "Vexis Finder | " .. tierName,
         description = description,
-        color       = embedColor,
-        footer      = { text = footerText },
-        timestamp   = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        color = embedColor,
+        footer = { text = footerText },
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     }
     if thumbnailUrl then embed.thumbnail = { url = thumbnailUrl } end
 
     local content = pingEveryone and "@everyone" or ""
-    local json    = HttpService:JSONEncode({ content = content, embeds = { embed } })
-    local req     = request or http_request or (syn and syn.request)
+    local json = HttpService:JSONEncode({ content = content, embeds = { embed } })
+    local req = request or http_request or (syn and syn.request)
     if req then
         pcall(function()
             req({
-                Url     = webhookUrl,
-                Method  = "POST",
+                Url = webhookUrl,
+                Method = "POST",
                 Headers = { ["Content-Type"] = "application/json" },
-                Body    = json,
+                Body = json,
             })
             print("[Discord] ✅ Sent | " .. formatNumber(bestInfo.genValue) .. " | tier=" .. tier)
             discordSentForServer = true
-            lastDiscordSend      = now
+            lastDiscordSend = now
         end)
     end
 end
@@ -506,21 +591,57 @@ end
 -- ==================== SERVER HOPPING ====================
 local currentServerStartTime = os.time()
 local lastEmptyTime = nil
-local isHopping = false
+local basesScanned = {}
 
-local function hopToNewServer()
-    if isHopping then return end
-    isHopping = true
+local function getOtherPlayers()
+    local localPlayer = Players.LocalPlayer
+    local others = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= localPlayer then
+            table.insert(others, player)
+        end
+    end
+    return others
+end
+
+local function hasScannedAllBases()
+    local others = getOtherPlayers()
+    local scannedCount = 0
     
-    local currentJobId = game.JobId
-    print(string.format("[HOP] Leaving server %s", currentJobId))
+    for _, player in ipairs(others) do
+        if basesScanned[player.Name] then
+            scannedCount = scannedCount + 1
+        end
+    end
     
-    addToBlacklist(currentJobId)
-    
-    local placeId = game.PlaceId
-    
-    task.wait(HOOP_COOLDOWN)
-    TeleportService:Teleport(placeId)
+    if #others > 0 and scannedCount >= #others then
+        print(string.format("[SCAN] Scanned all %d other players' bases!", scannedCount))
+        return true
+    end
+    return false
+end
+
+local function markBaseScanned(playerName)
+    if not basesScanned[playerName] then
+        basesScanned[playerName] = true
+        local others = getOtherPlayers()
+        local scanned = 0
+        for _, p in ipairs(others) do
+            if basesScanned[p.Name] then scanned = scanned + 1 end
+        end
+        print(string.format("[SCAN] Scanned %s's base | Progress: %d/%d", playerName, scanned, #others))
+    end
+end
+
+local function getBrainrotOwner(obj)
+    local overhead = obj:FindFirstChild("AnimalOverhead")
+    if overhead then
+        local nameLabel = overhead:FindFirstChild("DisplayName")
+        if nameLabel and nameLabel.Text then
+            return nameLabel.Text
+        end
+    end
+    return nil
 end
 
 -- ==================== MAIN SCANNER LOOP ====================
@@ -531,34 +652,49 @@ local currentJobId = game.JobId
 if isBlacklisted(currentJobId) then
     print(string.format("[BLACKLIST] Current server %s is blacklisted! Hopping immediately...", currentJobId))
     task.wait(1)
-    hopToNewServer()
+    TeleportService:Teleport(game.PlaceId)
     return
 else
     print(string.format("[INFO] Scanning server: %s", currentJobId))
 end
 
-print("[Scanner] Main loop started")
+print(string.format("[INFO] You are: %s", Players.LocalPlayer.Name))
+print("[INFO] Will scan ALL other players' bases, skip your own, then hop!")
+
+local otherPlayers = getOtherPlayers()
+print(string.format("[INFO] Found %d other player(s) to scan", #otherPlayers))
+
+print("[Scanner] Main loop started (Encrypted Mode)")
 
 while true do
     task.wait(SCAN_INTERVAL)
     
-    local scanTime = os.time() - currentServerStartTime
-    
-    if scanTime >= SCAN_TIMEOUT then
-        print(string.format("[HOP] Scan timeout reached (%d seconds), hopping...", SCAN_TIMEOUT))
-        hopToNewServer()
+    if hasScannedAllBases() then
+        print("[HOP] All other players' bases have been scanned! Hopping to new server...")
+        addToBlacklist(currentJobId)
+        task.wait(HOOP_COOLDOWN)
+        TeleportService:Teleport(game.PlaceId)
         break
     end
     
     local found = scanDebris()
     
+    for _, info in ipairs(found) do
+        local owner = getBrainrotOwner(info.obj)
+        if owner and owner ~= Players.LocalPlayer.Name then
+            markBaseScanned(owner)
+        end
+    end
+    
     if #found == 0 then
         if not lastEmptyTime then
             lastEmptyTime = os.time()
-            print("[SCAN] No pets found, starting empty server timer...")
+            print("[SCAN] No pets found in other bases, waiting...")
         elseif os.time() - lastEmptyTime >= EMPTY_SERVER_TIMEOUT then
-            print(string.format("[HOP] No pets found for %d seconds, hopping...", EMPTY_SERVER_TIMEOUT))
-            hopToNewServer()
+            print(string.format("[HOP] No pets found in other bases for %d seconds, hopping...", EMPTY_SERVER_TIMEOUT))
+            addToBlacklist(currentJobId)
+            task.wait(HOOP_COOLDOWN)
+            TeleportService:Teleport(game.PlaceId)
             break
         end
     else
@@ -570,7 +706,7 @@ while true do
         end
 
         local emoji = best.isDuel and "⚔️" or "💰"
-        print(string.format("   → Found %d brainrot(s) | %s %s (%s/s) %s",
+        print(string.format("   → Found %d brainrot(s) in other bases | %s %s (%s/s) %s",
             #found, emoji, normalizeName(best.name),
             formatNumber(best.genValue), best.isDuel and "[DUEL]" or ""))
 
