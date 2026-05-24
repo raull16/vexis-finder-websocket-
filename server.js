@@ -1,12 +1,11 @@
 const WebSocket = require('ws');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 8080;
 
-// INSANE ENCRYPTION (must match client)
 const WS_SECRET = "cabinetdoorpinkponyunicorn";
 const SALT = "VEXIS_ONLY_ADMINS";
 
-// Store connected clients
 const clients = new Map();
 
 function generateKeyStream(length, seed_offset) {
@@ -55,29 +54,35 @@ function chaoticShuffle(data, forward) {
 }
 
 function tripleDecrypt(ciphertext) {
-    if (ciphertext.length < 4) return null;
-    
-    const timestamp = ciphertext.readUInt32LE(0);
-    const data = ciphertext.subarray(4);
-    
-    // Layer 1 reverse: XOR with secondary key
-    const stream3 = generateKeyStream(data.length, Math.floor(timestamp / 1000000));
-    const layer2_bytes = Buffer.alloc(data.length);
-    for (let i = 0; i < data.length; i++) {
-        layer2_bytes[i] = data[i] ^ stream3[i];
+    if (!ciphertext || ciphertext.length < 4) {
+        return null;
     }
     
-    // Layer 2 reverse: unshuffle
-    const layer1 = chaoticShuffle(layer2_bytes, false);
-    
-    // Layer 3 reverse: XOR with timestamp-based key
-    const stream1 = generateKeyStream(layer1.length, timestamp % 1000000);
-    const plaintext_bytes = Buffer.alloc(layer1.length);
-    for (let i = 0; i < layer1.length; i++) {
-        plaintext_bytes[i] = layer1[i] ^ stream1[i];
+    try {
+        const timestamp = ciphertext.readUInt32LE(0);
+        const data = ciphertext.subarray(4);
+        
+        if (data.length === 0) return null;
+        
+        const stream3 = generateKeyStream(data.length, Math.floor(timestamp / 1000000));
+        const layer2_bytes = Buffer.alloc(data.length);
+        for (let i = 0; i < data.length; i++) {
+            layer2_bytes[i] = data[i] ^ stream3[i];
+        }
+        
+        const layer1 = chaoticShuffle(layer2_bytes, false);
+        
+        const stream1 = generateKeyStream(layer1.length, timestamp % 1000000);
+        const plaintext_bytes = Buffer.alloc(layer1.length);
+        for (let i = 0; i < layer1.length; i++) {
+            plaintext_bytes[i] = layer1[i] ^ stream1[i];
+        }
+        
+        return plaintext_bytes.toString('utf8');
+    } catch (err) {
+        console.log('Decryption error:', err.message);
+        return null;
     }
-    
-    return plaintext_bytes.toString('utf8');
 }
 
 function verifySignature(ts, jobId, sig) {
@@ -98,18 +103,26 @@ const wss = new WebSocket.Server({ port: PORT });
 console.log(`WebSocket server running on port ${PORT}`);
 
 wss.on('connection', (ws, req) => {
-    const clientId = require('crypto').randomBytes(8).toString('hex');
+    const clientId = crypto.randomBytes(8).toString('hex');
     clients.set(clientId, ws);
-    console.log(`[${clientId}] Client connected from ${req.socket.remoteAddress}`);
+    console.log(`[${clientId}] Client connected`);
 
     ws.on('message', async (data) => {
+        // Ensure data is a buffer
+        let buffer = data;
+        if (typeof data === 'string') {
+            buffer = Buffer.from(data);
+        }
+        
+        console.log(`[${clientId}] Received ${buffer.length} bytes`);
+        
+        const decrypted = tripleDecrypt(buffer);
+        if (!decrypted) {
+            console.log(`[${clientId}] Decryption failed - invalid format`);
+            return;
+        }
+        
         try {
-            const decrypted = tripleDecrypt(data);
-            if (!decrypted) {
-                console.log(`[${clientId}] Decryption failed`);
-                return;
-            }
-            
             const payload = JSON.parse(decrypted);
             
             if (!verifySignature(payload.ts, payload.jobid, payload.sig)) {
@@ -122,11 +135,11 @@ wss.on('connection', (ws, req) => {
             // Broadcast to all other clients
             for (const [id, client] of clients) {
                 if (id !== clientId && client.readyState === WebSocket.OPEN) {
-                    client.send(data);
+                    client.send(buffer);
                 }
             }
         } catch (err) {
-            console.log(`[${clientId}] Error:`, err.message);
+            console.log(`[${clientId}] JSON parse error:`, err.message);
         }
     });
 
@@ -136,6 +149,6 @@ wss.on('connection', (ws, req) => {
     });
     
     ws.on('error', (err) => {
-        console.log(`[${clientId}] Error:`, err.message);
+        console.log(`[${clientId}] WebSocket error:`, err.message);
     });
 });
