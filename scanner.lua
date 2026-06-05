@@ -18,7 +18,6 @@ local WEBHOOK_LOW  = "https://discord.com/api/webhooks/1494112632733437952/BWhED
 local UNKNOWN_IMAGE = "https://cdn.discordapp.com/attachments/1485284656172630138/1494012668841951303/Z.png"
 
 -- ========== HOP CONFIG ==========
-local SCAN_TIMES_PER_SERVER = 1
 local SCAN_INTERVAL = 2
 
 -- ========== TIER RULES ==========
@@ -266,6 +265,12 @@ local function getBrainrotInfo(obj)
     local petName = nameLabel and nameLabel.Text or obj.Name
     local mutationText = (mutationLabel and mutationLabel.Text ~= "None" and mutationLabel.Text) or nil
     
+    -- Get owner name for grouping
+    local ownerName = nil
+    if nameLabel and nameLabel.Text then
+        ownerName = nameLabel.Text
+    end
+    
     local traits = readTraits(overhead)
     local imageUrl = getPetImage(overhead, petName)
     local mutationEmoji = getMutationEmoji(mutationText)
@@ -273,6 +278,7 @@ local function getBrainrotInfo(obj)
     
     return {
         name = petName,
+        owner = ownerName,
         genValue = genValue,
         mutation = mutationText,
         mutationEmoji = mutationEmoji,
@@ -295,6 +301,46 @@ local function scanDebris()
         end
     end
     return found
+end
+
+-- ========== GROUP PETS BY OWNER ==========
+local function groupPetsByOwner(pets)
+    local ownerGroups = {}
+    
+    for _, pet in ipairs(pets) do
+        local ownerKey = pet.owner or "Unknown"
+        if not ownerGroups[ownerKey] then
+            ownerGroups[ownerKey] = {}
+        end
+        
+        -- Find if same pet name + mutation + traits already exists
+        local found = false
+        for _, existing in ipairs(ownerGroups[ownerKey]) do
+            if existing.name == pet.name and 
+               existing.mutation == pet.mutation and
+               table.concat(existing.traits or {}, ",") == table.concat(pet.traits or {}, ",") then
+                existing.count = existing.count + 1
+                found = true
+                break
+            end
+        end
+        
+        if not found then
+            table.insert(ownerGroups[ownerKey], {
+                name = pet.name,
+                mutation = pet.mutation,
+                mutationEmoji = pet.mutationEmoji,
+                traits = pet.traits,
+                traitEmojis = pet.traitEmojis,
+                genValue = pet.genValue,
+                count = 1,
+                imageUrl = pet.imageUrl,
+                isDuel = pet.isDuel
+            })
+        end
+    end
+    
+    return ownerGroups
 end
 
 -- ========== WEBSOCKET ==========
@@ -333,52 +379,47 @@ local function sendToWS(data)
     pcall(function() ws:Send(encrypted) end)
 end
 
--- ========== DISCORD WEBHOOK (EXACT FORMAT) ==========
+-- ========== DISCORD WEBHOOK WITH PER-OWNER EMBEDS ==========
 local TIER_WEBHOOKS = { PEAK = WEBHOOK_PEAK, HIGH = WEBHOOK_HIGH, LOW = WEBHOOK_LOW }
 local TIER_NAMES = { PEAK = "Peaklight", HIGH = "Highlight", LOW = "Lowlight" }
 
-local function buildEntryLine(info, count)
+local function buildPetLine(pet)
     local parts = {}
-    table.insert(parts, count .. "x")
-    if info.mutationEmoji then
-        table.insert(parts, info.mutationEmoji)
+    table.insert(parts, pet.count .. "x")
+    if pet.mutationEmoji then
+        table.insert(parts, pet.mutationEmoji)
     end
-    table.insert(parts, info.name)
-    if info.traitEmojis and info.traitEmojis ~= "" then
-        table.insert(parts, info.traitEmojis)
+    table.insert(parts, pet.name)
+    if pet.traitEmojis and pet.traitEmojis ~= "" then
+        table.insert(parts, pet.traitEmojis)
     end
-    table.insert(parts, "($" .. formatNumber(info.genValue) .. "/s)")
+    table.insert(parts, "($" .. formatNumber(pet.genValue) .. "/s)")
     return table.concat(parts, " ")
 end
 
-local function sendToDiscord(foundList, best, tier, playerCount, jobId)
-    -- Sort by gen value (highest first)
-    local sorted = {}
-    for _, info in ipairs(foundList) do
-        table.insert(sorted, info)
-    end
-    table.sort(sorted, function(a, b) return a.genValue > b.genValue end)
-    
-    local effectiveDuel = isDuelCooldown or best.isDuel
-    local statusIcon = effectiveDuel and "✖️" or "✔️"
+local function sendOwnerEmbed(owner, pets, tier, effectiveDuel, playerCount, jobId, isGlobalDuel)
     local currentTime = os.time()
+    local statusIcon = (isGlobalDuel or effectiveDuel) and "✖️" or "✔️"
+    
+    -- Sort pets by gen value
+    table.sort(pets, function(a, b) return a.genValue > b.genValue end)
     
     -- Build best line
-    local bestLine = buildEntryLine(sorted[1], 1)
+    local bestLine = buildPetLine(pets[1])
     
     -- Build others lines
     local otherLines = {}
-    for i = 2, #sorted do
-        table.insert(otherLines, buildEntryLine(sorted[i], 1))
+    for i = 2, #pets do
+        table.insert(otherLines, buildPetLine(pets[i]))
     end
     local othersText = (#otherLines > 0) and table.concat(otherLines, "\n") or "No other brainrots"
     
-    -- Get thumbnail URL
-    local thumbnailUrl = best.imageUrl or UNKNOWN_IMAGE
+    -- Get thumbnail from best pet
+    local thumbnailUrl = pets[1].imageUrl or UNKNOWN_IMAGE
     
-    -- Build the embed content exactly as requested
     local embedContent = string.format(
         "## Vexis Finder | %s <:vexis_v_logo:1500538391836622999>\n" ..
+        "### 👤 %s\n" ..
         "# %s\n" ..
         "\n" ..
         "**Others**\n" ..
@@ -386,6 +427,7 @@ local function sendToDiscord(foundList, best, tier, playerCount, jobId)
         "\n" ..
         "-# discord.gg/vexis • %s • <t:%d:f>",
         TIER_NAMES[tier],
+        owner,
         bestLine,
         othersText,
         statusIcon,
@@ -393,13 +435,31 @@ local function sendToDiscord(foundList, best, tier, playerCount, jobId)
     )
     
     local embed = {
-        color = 0x000000,  -- Black
+        color = 0x000000,
         description = embedContent,
         thumbnail = { url = thumbnailUrl }
     }
     
+    return embed
+end
+
+local function sendToDiscord(ownerGroups, tier, playerCount, jobId, isGlobalDuel)
     local req = syn and syn.request or request or http_request
-    if req then
+    if not req then return end
+    
+    -- Send one embed per owner
+    for owner, pets in pairs(ownerGroups) do
+        -- Check if any pet in this group is in duel
+        local hasDuel = false
+        for _, pet in ipairs(pets) do
+            if pet.isDuel then
+                hasDuel = true
+                break
+            end
+        end
+        
+        local embed = sendOwnerEmbed(owner, pets, tier, hasDuel, playerCount, jobId, isGlobalDuel)
+        
         pcall(function()
             req({
                 Url = TIER_WEBHOOKS[tier],
@@ -407,9 +467,10 @@ local function sendToDiscord(foundList, best, tier, playerCount, jobId)
                 Headers = { ["Content-Type"] = "application/json" },
                 Body = HttpService:JSONEncode({ embeds = { embed } })
             })
-            print(string.format("[Discord] Sent %s [%s] | %s/s", best.name, tier, formatNumber(best.genValue)))
         end)
     end
+    
+    print(string.format("[Discord] Sent %d owner embeds [%s]", #ownerGroups, tier))
 end
 
 -- ========== SERVER HOP ==========
@@ -424,7 +485,7 @@ end
 
 -- ========== MAIN LOOP ==========
 print("[Scanner] Started!")
-print("[Scanner] Mode: Scan once per server, then hop")
+print("[Scanner] Mode: Scan once per server, then hop (per-owner grouping)")
 print("[Scanner] WS: " .. WS_URL)
 
 -- Disable textures
@@ -456,30 +517,37 @@ while true do
     local playerCount = #Players:GetPlayers()
     
     if #found > 0 then
-        -- Sort and get best
-        table.sort(found, function(a, b) return a.genValue > b.genValue end)
-        local best = found[1]
-        local tier = getTier(best.name, best.genValue)
-        local effectiveDuel = isDuelCooldown or best.isDuel
+        -- Group by owner
+        local ownerGroups = groupPetsByOwner(found)
+        
+        -- Find the best pet overall for tier calculation
+        local bestPet = found[1]
+        for _, pet in ipairs(found) do
+            if pet.genValue > bestPet.genValue then
+                bestPet = pet
+            end
+        end
+        
+        local tier = getTier(bestPet.name, bestPet.genValue)
         
         -- Console log
-        print(string.format("[DATA] JobID: %s | Players: %d | Pet: %s | Money: %s/s | InDuel: %s | Mutation: %s | Traits: %d",
-            currentJobId, playerCount, best.name, formatNumber(best.genValue), 
-            tostring(effectiveDuel), best.mutation or "None", #(best.traits or 0)))
+        print(string.format("[DATA] JobID: %s | Players: %d | Owners: %d | Best: %s | %s/s | InDuel: %s",
+            currentJobId, playerCount, #ownerGroups, bestPet.name, formatNumber(bestPet.genValue), 
+            tostring(isDuelCooldown or bestPet.isDuel)))
         
         -- Send to WebSocket
         sendToWS({
             jobId = currentJobId,
             playerCount = playerCount,
-            petName = best.name,
-            moneyPerSecond = formatNumber(best.genValue),
-            inDuel = effectiveDuel,
-            mutation = best.mutation or "None",
-            traits = (#(best.traits or {}) > 0) and table.concat(best.traits, ",") or "None"
+            petName = bestPet.name,
+            moneyPerSecond = formatNumber(bestPet.genValue),
+            inDuel = isDuelCooldown or bestPet.isDuel,
+            mutation = bestPet.mutation or "None",
+            traits = (#(bestPet.traits or {}) > 0) and table.concat(bestPet.traits, ",") or "None"
         })
         
-        -- Send to Discord
-        sendToDiscord(found, best, tier, playerCount, currentJobId)
+        -- Send to Discord (one embed per owner)
+        sendToDiscord(ownerGroups, tier, playerCount, currentJobId, isDuelCooldown)
     else
         print(string.format("[DATA] JobID: %s | Players: %d | No pets found", currentJobId, playerCount))
     end
