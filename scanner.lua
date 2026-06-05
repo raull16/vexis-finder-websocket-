@@ -15,6 +15,12 @@ local WEBHOOK_PEAK = "https://discord.com/api/webhooks/1494112447991251006/A2UTk
 local WEBHOOK_HIGH = "https://discord.com/api/webhooks/1494112540001697964/dCs_yovsxBeGOarO7JlzNCATsA7C36XPTotjlkZ32qhvlGzWC5Cimk4w_z1LnhGBMNUq"
 local WEBHOOK_LOW  = "https://discord.com/api/webhooks/1494112632733437952/BWhEDEjPH5Hnzcob41pLWHuiJ2a7HOrH9ilDENxUXTX5dLtccLppeprHoAqbz7xhAGsy"
 
+local UNKNOWN_IMAGE = "https://cdn.discordapp.com/attachments/1485284656172630138/1494012668841951303/Z.png"
+
+-- ========== HOP CONFIG ==========
+local SCAN_TIMES_PER_SERVER = 1  -- Scan once then hop
+local SCAN_INTERVAL = 2
+
 -- ========== TIER RULES ==========
 local OG_NAMES = {
     ["meowl"] = true, ["love love bear"] = true, ["strawberry elephant"] = true,
@@ -32,46 +38,85 @@ local function getTier(name, genValue)
     else return "LOW" end
 end
 
--- ========== BLACKLIST (WITH ERROR HANDLING) ==========
-local blacklistedJobs = {}
-local currentJobId = game.JobId
+-- ========== MUTATION EMOJIS ==========
+local MUTATION_EMOJIS = {
+    ["yin yang"]    = "<:mutation_yin_yang:1508171620974460958>",
+    ["rainbow"]     = "<:mutation_rainbow:1508149969973022912>",
+    ["radioactive"] = "<:mutation_radioactive:1508173695229628567>",
+    ["lava"]        = "<:mutation_lava:1508149952449351860>",
+    ["gold"]        = "<:mutation_gold:1508149845498794175>",
+    ["galaxy"]      = "<:mutation_galaxy:1508149828599677049>",
+    ["divine"]      = "<:mutation_divine:1508149639294222479>",
+    ["diamond"]     = "<:mutation_diamond:1508148825317969980>",
+    ["cyber"]       = "<:mutation_cyber:1508149621728346334>",
+    ["cursed"]      = "<:mutation_cursed:1508172985591402597>",
+    ["candy"]       = "<:mutation_candy:1508149586223431813>",
+    ["bloodrot"]    = "<:mutation_bloodrot:1508149610340679741>",
+}
 
-local function fetchBlacklist()
-    local req = syn and syn.request or request or http_request
-    if not req then 
-        print("[BLACKLIST] No HTTP request function, skipping")
-        return 
-    end
-    
-    local success, res = pcall(function()
-        return req({
-            Url = "https://vexisfinder13.onrender.com/blacklist",
-            Method = "GET",
-            Timeout = 5
-        })
-    end)
-    
-    if success and res and res.Body then
-        local body = res.Body
-        -- Check if response is valid JSON (starts with { or [)
-        if string.sub(body, 1, 1) == "{" or string.sub(body, 1, 1) == "[" then
-            local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
-            if ok and data and data.blacklisted then
-                for _, jobId in ipairs(data.blacklisted) do
-                    blacklistedJobs[jobId] = true
-                end
-                print("[BLACKLIST] Loaded " .. #data.blacklisted .. " jobs")
-            end
-        else
-            print("[BLACKLIST] Server returned non-JSON, skipping blacklist")
-        end
-    else
-        print("[BLACKLIST] Could not fetch, continuing anyway")
-    end
+local function getMutationEmoji(mutationText)
+    if not mutationText or mutationText == "" or mutationText == "None" then return nil end
+    return MUTATION_EMOJIS[mutationText:lower()] or nil
 end
 
--- Run blacklist check (non-critical, continue even if fails)
-pcall(fetchBlacklist)
+-- ========== TRAIT EMOJIS ==========
+local TRAIT_EMOJIS = {
+    ["glitch"] = "<:trait_glitch:1508149788955119756>",
+    ["fire"] = "<:trait_fire:1508150604579602444>",
+    ["water"] = "<:trait_water:1508149057183547482>",
+    ["dragon"] = "<:trait_dragon:1508149304219668550>",
+    ["halo"] = "<:trait_halo:1508151798110879945>",
+    ["skibidi toilet"] = "<:trait_skibidi_toliet:1508152061840064573>",
+    ["meowl"] = "<:trait_meowl:1508152142202933248>",
+    ["shark"] = "<:trait_shark:1508150426342523022>",
+    ["nyan cat"] = "<:trait_nyan_cat:1508149102309937382>",
+}
+
+local function getTraitEmojis(traits)
+    if not traits or #traits == 0 then return "" end
+    local emojis = {}
+    for _, trait in ipairs(traits) do
+        local emoji = TRAIT_EMOJIS[trait:lower()]
+        if emoji then table.insert(emojis, emoji) end
+    end
+    return table.concat(emojis, " ")
+end
+
+-- ========== PET IMAGE EXTRACTION ==========
+local function getPetImageFromOverhead(overhead)
+    for _, child in ipairs(overhead:GetChildren()) do
+        if child:IsA("ImageLabel") then
+            local assetId = tonumber(child.Image:match("%d+"))
+            if assetId then
+                return "https://www.roblox.com/asset-thumbnail/image?assetId=" .. assetId .. "&width=420&height=420&format=png"
+            end
+        end
+    end
+    return nil
+end
+
+local function getPetImage(animalOverhead, petName)
+    local image = getPetImageFromOverhead(animalOverhead)
+    if image then return image end
+    return UNKNOWN_IMAGE
+end
+
+-- ========== TRAIT READING ==========
+local function readTraits(overhead)
+    local traits = {}
+    local traitsFolder = overhead:FindFirstChild("Traits")
+    if traitsFolder then
+        for _, child in ipairs(traitsFolder:GetChildren()) do
+            if child:IsA("StringValue") then
+                local val = child.Value
+                if val and val ~= "" then
+                    table.insert(traits, val:lower())
+                end
+            end
+        end
+    end
+    return traits
+end
 
 -- ========== WEBSOCKET ENCRYPTION ==========
 local function buildKeyStream(length)
@@ -99,25 +144,10 @@ local function scramble(plaintext)
     return table.concat(result)
 end
 
-local function signMessage(ts, jobId)
-    local raw = WS_SECRET .. WS_SALT .. tostring(ts) .. tostring(jobId)
-    local h = 5381
-    for i = 1, #raw do
-        h = (h * 33 + string.byte(raw, i)) % 2147483647
-    end
-    local h2 = 52711
-    for i = #raw, 1, -1 do
-        h2 = (h2 * 31 + string.byte(raw, i)) % 2147483647
-    end
-    return string.format("%x%x", h, h2)
-end
-
 -- ========== HELPERS ==========
 local MIN_GEN = 10000000
-local SCAN_INTERVAL = 2
 local ws = nil
 local isDuelCooldown = false
-local lastDiscordSend = 0
 
 local function parseGen(text)
     if not text then return 0 end
@@ -164,23 +194,6 @@ local function updateDuelStatus()
     end
 end
 
--- ========== TRAIT READING ==========
-local function getTraits(overhead)
-    local traits = {}
-    local traitsFolder = overhead:FindFirstChild("Traits")
-    if traitsFolder then
-        for _, child in ipairs(traitsFolder:GetChildren()) do
-            if child:IsA("StringValue") then
-                local val = child.Value
-                if val and val ~= "" then
-                    table.insert(traits, val)
-                end
-            end
-        end
-    end
-    return traits
-end
-
 -- ========== SCANNER ==========
 local function getBrainrotInfo(obj)
     local overhead = obj:FindFirstChild("AnimalOverhead")
@@ -194,14 +207,27 @@ local function getBrainrotInfo(obj)
     
     local nameLabel = overhead:FindFirstChild("DisplayName")
     local mutationLabel = overhead:FindFirstChild("Mutation")
+    local petName = nameLabel and nameLabel.Text or obj.Name
+    local mutationText = (mutationLabel and mutationLabel.Text ~= "None" and mutationLabel.Text) or nil
+    
+    local traits = readTraits(overhead)
+    local imageUrl = getPetImage(overhead, petName)
+    local mutationEmoji = getMutationEmoji(mutationText)
+    local traitEmojis = getTraitEmojis(traits)
+    
+    local formattedNameParts = {}
+    if mutationEmoji then table.insert(formattedNameParts, mutationEmoji) end
+    table.insert(formattedNameParts, petName)
+    if traitEmojis ~= "" then table.insert(formattedNameParts, traitEmojis) end
     
     return {
-        name = nameLabel and nameLabel.Text or obj.Name,
+        name = petName,
+        formattedName = table.concat(formattedNameParts, " "),
         genValue = genValue,
-        mutation = (mutationLabel and mutationLabel.Text ~= "None" and mutationLabel.Text) or nil,
-        traits = getTraits(overhead),
-        isDuel = isDuelBrainrot(obj),
-        obj = obj
+        mutation = mutationText,
+        traits = traits,
+        imageUrl = imageUrl,
+        isDuel = isDuelBrainrot(obj)
     }
 end
 
@@ -222,62 +248,56 @@ end
 -- ========== WEBSOCKET ==========
 local function connectWS()
     while true do
-        print("[WS] Connecting to " .. WS_URL)
-        local success, result = pcall(function() 
-            return WebSocket.connect(WS_URL) 
-        end)
+        local success, result = pcall(function() return WebSocket.connect(WS_URL) end)
         if success and result then
             ws = result
             print("[WS] Connected!")
             ws.OnClose:Connect(function()
-                print("[WS] Closed, reconnecting...")
                 ws = nil
                 task.wait(5)
                 connectWS()
             end)
             break
         else
-            print("[WS] Failed: " .. tostring(result))
             task.wait(5)
         end
     end
 end
 spawn(connectWS)
 
-local function sendToWS(best)
+local function sendToWS(data)
     if not ws then return end
-    local emoji = (isDuelCooldown or best.isDuel) and "⚔️" or "💰"
     local payload = {
-        jobid = game.JobId,
-        money = best.genValue,
-        name = emoji .. " " .. best.name,
-        players = #Players:GetPlayers(),
-        ts = os.time(),
+        jobid = data.jobId,
+        players = data.playerCount,
+        petName = data.petName,
+        moneyPerSecond = data.moneyPerSecond,
+        inDuel = data.inDuel,
+        mutation = data.mutation,
+        traits = data.traits
     }
     local json = HttpService:JSONEncode(payload)
-    local scrambled = scramble(json)
-    pcall(function() ws:Send(scrambled) end)
+    local encrypted = scramble(json)
+    pcall(function() ws:Send(encrypted) end)
 end
 
 -- ========== DISCORD WEBHOOK ==========
 local TIER_COLORS = { PEAK = 0xFF4500, HIGH = 0xFFA500, LOW = 0x888888 }
 local TIER_WEBHOOKS = { PEAK = WEBHOOK_PEAK, HIGH = WEBHOOK_HIGH, LOW = WEBHOOK_LOW }
 
-local function sendToDiscord(best, tier)
-    local now = tick()
-    if now - lastDiscordSend < 10 then return end
-    
+local function sendToDiscord(best, tier, playerCount, jobId)
     local effectiveDuel = isDuelCooldown or best.isDuel
     local mutationText = best.mutation or "None"
-    local traitCount = #(best.traits or {})
+    local traitList = (best.traits and #best.traits > 0) and table.concat(best.traits, ", ") or "None"
     
     local embed = {
-        title = string.format("%s %s | %s/s", effectiveDuel and "⚔️" or "💰", best.name, formatNumber(best.genValue)),
-        description = string.format("**Mutation:** %s\n**Traits:** %d\n**Players:** %d\n**Duel:** %s",
-            mutationText, traitCount, #Players:GetPlayers(), effectiveDuel and "YES ⚔️" or "NO"),
+        title = string.format("%s %s | %s/s", effectiveDuel and "⚔️" or "💰", best.formattedName, formatNumber(best.genValue)),
+        description = string.format("**Mutation:** %s\n**Traits:** %s\n**Players:** %d\n**Job ID:** `%s`\n**In Duel:** %s",
+            mutationText, traitList, playerCount, jobId, effectiveDuel and "true" or "false"),
         color = TIER_COLORS[tier],
+        thumbnail = { url = best.imageUrl },
         timestamp = os.date("!%Y-%m-%dT%H:%M:%S.000Z"),
-        footer = { text = string.format("Tier: %s | Job: %s", tier, string.sub(game.JobId, 1, 12)) }
+        footer = { text = string.format("Tier: %s", tier) }
     }
     
     local req = syn and syn.request or request or http_request
@@ -289,18 +309,31 @@ local function sendToDiscord(best, tier)
                 Headers = { ["Content-Type"] = "application/json" },
                 Body = HttpService:JSONEncode({ embeds = { embed } })
             })
-            print(string.format("[Discord] Sent %s [%s]", best.name, tier))
-            lastDiscordSend = now
         end)
+    end
+end
+
+-- ========== SERVER HOP ==========
+local function hopToNewServer()
+    print("[HOP] Moving to new server...")
+    task.wait(1)
+    local placeId = game.PlaceId
+    local success, err = pcall(function()
+        TeleportService:Teleport(placeId)
+    end)
+    if not success then
+        print("[HOP] Failed: " .. tostring(err))
+        task.wait(2)
+        TeleportService:Teleport(placeId)
     end
 end
 
 -- ========== MAIN LOOP ==========
 print("[Scanner] Started!")
+print("[Scanner] Mode: Scan once per server, then hop")
 print("[Scanner] WS: " .. WS_URL)
-print("[Scanner] Rules: 0-250m=LOW | 250-500m=HIGH | 500m+=PEAK")
 
--- Disable textures for performance
+-- Disable textures
 spawn(function()
     task.wait(2)
     for _, obj in ipairs(workspace:GetDescendants()) do
@@ -312,14 +345,25 @@ spawn(function()
     end
 end)
 
-local scanCount = 0
+local serversScanned = 0
+
 while true do
+    serversScanned = serversScanned + 1
+    local currentJobId = game.JobId
+    print(string.format("\n[SCAN #%d] Server: %s", serversScanned, currentJobId))
+    
+    -- Wait for game to load
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    repeat task.wait() until Players.LocalPlayer
+    
     task.wait(SCAN_INTERVAL)
-    scanCount = scanCount + 1
     updateDuelStatus()
     
     local found = scanDebris()
+    local playerCount = #Players:GetPlayers()
+    
     if #found > 0 then
+        -- Get best pet
         local best = found[1]
         for _, info in ipairs(found) do
             if info.genValue > best.genValue then
@@ -328,13 +372,47 @@ while true do
         end
         
         local tier = getTier(best.name, best.genValue)
-        local duelIcon = (isDuelCooldown or best.isDuel) and "⚔️" or "💰"
+        local effectiveDuel = isDuelCooldown or best.isDuel
         
-        print(string.format("[%d] %s %s | %s/s [%s]", scanCount, duelIcon, best.name, formatNumber(best.genValue), tier))
+        -- Console log (unencrypted, visible in Render logs)
+        print(string.format("[DATA] JobID: %s | Players: %d | Pet: %s | Money: %s/s | InDuel: %s | Mutation: %s | Traits: %d",
+            currentJobId,
+            playerCount,
+            best.name,
+            formatNumber(best.genValue),
+            tostring(effectiveDuel),
+            best.mutation or "None",
+            #(best.traits or 0)
+        ))
         
-        sendToWS(best)
-        sendToDiscord(best, tier)
-    elseif scanCount % 15 == 0 then
-        print("[Scan " .. scanCount .. "] Waiting for pets...")
+        -- Send to WebSocket (encrypted)
+        sendToWS({
+            jobId = currentJobId,
+            playerCount = playerCount,
+            petName = best.name,
+            moneyPerSecond = formatNumber(best.genValue),
+            inDuel = effectiveDuel,
+            mutation = best.mutation or "None",
+            traits = (#(best.traits or {}) > 0) and table.concat(best.traits, ",") or "None"
+        })
+        
+        -- Send to Discord
+        sendToDiscord(best, tier, playerCount, currentJobId)
+    else
+        -- No pets found, still log the scan
+        print(string.format("[DATA] JobID: %s | Players: %d | No pets found", currentJobId, playerCount))
+        
+        sendToWS({
+            jobId = currentJobId,
+            playerCount = playerCount,
+            petName = "None",
+            moneyPerSecond = "0",
+            inDuel = false,
+            mutation = "None",
+            traits = "None"
+        })
     end
+    
+    -- Hop to new server after scan
+    hopToNewServer()
 end
