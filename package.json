@@ -1,11 +1,15 @@
 {
-  "name": "vexisfinder-websocket",
+  "name": "vexis-finder-websocket",
   "version": "1.0.0",
+  "description": "Vexis Finder WebSocket Server with Multi-Layer Encryption",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "ws": "^8.14.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
