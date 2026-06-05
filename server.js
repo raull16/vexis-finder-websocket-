@@ -1,166 +1,85 @@
 const WebSocket = require('ws');
-const crypto = require('crypto');
+const http = require('http');
 
 const PORT = process.env.PORT || 8080;
-const clients = new Map();
 
-// Your encryption keys (only server knows how to decode for logs)
-const WS_SECRET = "cabinetdoorpinkponyunicorn";
-const SALT = "VEXIS_ONLY_ADMINS";
-
-// Gibberish characters for outward appearance
-const GIBBERISH_CHARS = [
-    "Æ", "ß", "©", "®", "™", "€", "¥", "£", "§", "¶", 
-    "∆", "˚", "¬", "√", "∑", "≈", "¥", "Ω", "å", "∫",
-    "ç", "∂", "ƒ", "©", "˙", "ˆ", "ˇ", "˘", "≤", "≥",
-    "V", "E", "X", "I", "S", "7", "6", "!", "@", "#"
-];
-
-// ==================== DECRYPTION (For server logs only) ====================
-function generateKeyStream(length, seed_offset) {
-    let seed = 0;
-    for (let i = 0; i < WS_SECRET.length; i++) {
-        seed = (seed * 31 + WS_SECRET.charCodeAt(i)) % 2147483647;
-    }
-    seed = (seed + seed_offset) >>> 0;
-    
-    let a = seed, b = seed * 1664525 + 1013904223, c = seed * 1103515245 + 12345;
-    const stream = [];
-    for (let i = 0; i < length; i++) {
-        a = (a * 1664525 + 1013904223) >>> 0;
-        b = (b * 1103515245 + 12345) >>> 0;
-        c = (c * 134775813 + 1) >>> 0;
-        stream.push((a & 0xFF) ^ (b & 0xFF) ^ (c & 0xFF));
-    }
-    return stream;
-}
-
-function chaoticShuffle(data, forward) {
-    let bytes = [...data];
-    let seed = 0;
-    for (let i = 0; i < SALT.length; i++) {
-        seed = (seed * 31 + SALT.charCodeAt(i)) % 2147483647;
-    }
-    
-    const swaps = [];
-    for (let i = bytes.length - 1; i >= 1; i--) {
-        seed = (seed * 1664525 + 1013904223) >>> 0;
-        const j = (seed % i) + 1;
-        swaps.push([i, j]);
-    }
-    
-    if (forward) {
-        for (const [i, j] of swaps) {
-            [bytes[i], bytes[j]] = [bytes[j], bytes[i]];
-        }
+// Create HTTP server
+const server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+        res.writeHead(200);
+        res.end('OK');
     } else {
-        for (let k = swaps.length - 1; k >= 0; k--) {
-            const [i, j] = swaps[k];
-            [bytes[i], bytes[j]] = [bytes[j], bytes[i]];
-        }
+        res.writeHead(426, { 'Content-Type': 'text/plain' });
+        res.end('WebSocket server only');
     }
-    return Buffer.from(bytes);
-}
+});
 
-function tripleDecrypt(ciphertext) {
-    if (!ciphertext || ciphertext.length < 4) return null;
-    
+// Create WebSocket server
+const wss = new WebSocket.Server({ server });
+
+// Decrypt function (reverse of Lua encryption)
+function decryptData(encryptedBase64) {
     try {
-        const timestamp = ciphertext.readUInt32LE(0);
-        const data = ciphertext.subarray(4);
-        
-        if (data.length === 0) return null;
-        
-        const stream3 = generateKeyStream(data.length, Math.floor(timestamp / 1000000));
-        const layer2_bytes = Buffer.alloc(data.length);
-        for (let i = 0; i < data.length; i++) {
-            layer2_bytes[i] = data[i] ^ stream3[i];
+        const hex = Buffer.from(encryptedBase64, 'base64').toString('utf-8');
+        let json = '';
+        for (let i = 0; i < hex.length; i += 2) {
+            json += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
         }
-        
-        const layer1 = chaoticShuffle(layer2_bytes, false);
-        
-        const stream1 = generateKeyStream(layer1.length, timestamp % 1000000);
-        const plaintext_bytes = Buffer.alloc(layer1.length);
-        for (let i = 0; i < layer1.length; i++) {
-            plaintext_bytes[i] = layer1[i] ^ stream1[i];
-        }
-        
-        return plaintext_bytes.toString('utf8');
-    } catch (err) {
+        return JSON.parse(json);
+    } catch (e) {
         return null;
     }
 }
 
-// ==================== GIBBERISH ENCRYPTION (For clients) ====================
-function toGibberish(message) {
-    let result = [];
-    for (let i = 0; i < message.length; i++) {
-        const charCode = message.charCodeAt(i);
-        const gibIndex = (charCode + i) % GIBBERISH_CHARS.length;
-        result.push(GIBBERISH_CHARS[gibIndex]);
-        if (i % 5 === 0) {
-            result.push("Vexis");
-        } else if (i % 3 === 0) {
-            result.push("6767");
-        }
-    }
-    return result.join('');
-}
-
-const wss = new WebSocket.Server({ port: PORT });
-console.log(`WebSocket server running on port ${PORT}`);
-console.log(`🔒 Mode: Clients see gibberish only`);
-console.log(`📊 Mode: Server logs show decrypted data`);
+// Store connected clients
+const clients = new Set();
 
 wss.on('connection', (ws, req) => {
-    const clientId = crypto.randomBytes(8).toString('hex');
-    clients.set(clientId, ws);
-    console.log(`[${clientId}] Client connected`);
-
-    ws.on('message', async (data) => {
+    console.log(`[WS] Client connected from ${req.socket.remoteAddress}`);
+    clients.add(ws);
+    
+    ws.on('message', (data) => {
         try {
-            let buffer = data;
-            if (typeof data === 'string') {
-                buffer = Buffer.from(data);
-            }
-            
-            // Only the server can decrypt for logging
-            const decrypted = tripleDecrypt(buffer);
-            
-            if (decrypted) {
-                try {
-                    const payload = JSON.parse(decrypted);
-                    // Show NORMAL readable logs on Render only
-                    console.log(`[${clientId}] 📡 ${payload.name} | ${payload.money.toLocaleString()}/s | ${payload.players}/${payload.maxplayers} players | Job: ${payload.jobid}`);
-                    
-                    // Convert to gibberish before sending to other clients
-                    const gibberish = toGibberish(decrypted);
-                    
-                    // Broadcast GIBBERISH to other clients (they can't read it)
-                    for (const [id, client] of clients) {
-                        if (id !== clientId && client.readyState === WebSocket.OPEN) {
-                            client.send(gibberish);
-                        }
+            const decoded = decryptData(data.toString());
+            if (decoded) {
+                // Log to console
+                console.log('\n=== SCAN DATA ===');
+                console.log(`Job ID (encrypted): ${decoded.jobId}`);
+                console.log(`Player Count: ${decoded.playerCount}`);
+                console.log(`Pets Found: ${decoded.pets.length}`);
+                decoded.pets.forEach((pet, i) => {
+                    console.log(`  ${i+1}. ${pet.petName} | ${pet.genValue} | InDuel: ${pet.inDuel}`);
+                });
+                console.log(`Timestamp: ${new Date(decoded.timestamp * 1000).toISOString()}`);
+                console.log('=================\n');
+                
+                // Broadcast to all other clients (optional)
+                clients.forEach(client => {
+                    if (client !== ws && client.readyState === WebSocket.OPEN) {
+                        client.send(data);
                     }
-                } catch (err) {
-                    console.log(`[${clientId}] Parse error:`, err.message);
-                }
-            } else {
-                // If not our encrypted format, just show as received
-                let msgPreview = buffer.toString('utf8').substring(0, 50);
-                console.log(`[${clientId}] 🔒 Received (Encrypted): ${msgPreview}...`);
+                });
             }
         } catch (err) {
-            console.log(`[${clientId}] Error:`, err.message);
+            console.error('[WS] Parse error:', err.message);
         }
     });
-
+    
     ws.on('close', () => {
-        clients.delete(clientId);
-        console.log(`[${clientId}] Client disconnected | ${clients.size} remaining`);
+        console.log('[WS] Client disconnected');
+        clients.delete(ws);
     });
     
     ws.on('error', (err) => {
-        console.log(`[${clientId}] WebSocket error:`, err.message);
+        console.error('[WS] Error:', err.message);
+        clients.delete(ws);
     });
+    
+    // Send welcome
+    ws.send(Buffer.from(JSON.stringify({ status: 'connected', timestamp: Date.now() })));
+});
+
+server.listen(PORT, () => {
+    console.log(`[SERVER] WebSocket server running on port ${PORT}`);
+    console.log(`[SERVER] wss://vexisfinder13.onrender.com (or localhost:${PORT})`);
 });
