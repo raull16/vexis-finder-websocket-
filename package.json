@@ -1,7 +1,7 @@
 {
   "name": "vexisfinder-websocket",
-  "version": "1.0.0",
-  "description": "WebSocket bridge for Roblox scanner",
+  "version": "2.0.0",
+  "description": "WebSocket server for VexisFinder Roblox scanner with encryption and blacklist",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -15,5 +15,7 @@
   },
   "engines": {
     "node": ">=16.0.0"
-  }
+  },
+  "keywords": ["websocket", "roblox", "scanner", "encryption"],
+  "author": "VexisFinder"
 }
