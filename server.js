@@ -2,22 +2,36 @@ const WebSocket = require('ws');
 const http = require('http');
 
 const PORT = process.env.PORT || 8080;
-let blacklistedJobs = new Set();
 
-const decryptionSeed = 0x7F3A9C2E;
-function decryptData(encryptedBase64) {
+// Decryption function
+const WS_SECRET = "cabinetdoorpinkponyunicorn";
+const WS_SALT = "VEXIS_ONLY_ADMINS";
+
+function buildKeyStream(length) {
+    let stream = [];
+    let seed = 0;
+    let combined = WS_SECRET + WS_SALT;
+    for (let i = 0; i < combined.length; i++) {
+        seed = (seed * 31 + combined.charCodeAt(i)) % 2147483647;
+    }
+    let a = seed;
+    for (let i = 0; i < length; i++) {
+        a = (a * 1664525 + 1013904223) >>> 0;
+        stream.push(a % 256);
+    }
+    return stream;
+}
+
+function decryptData(encryptedHex) {
     try {
-        const hex = Buffer.from(encryptedBase64, 'base64').toString('utf-8');
         let xorBytes = '';
-        for (let i = 0; i < hex.length; i += 2) {
-            xorBytes += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+        for (let i = 0; i < encryptedHex.length; i += 2) {
+            xorBytes += String.fromCharCode(parseInt(encryptedHex.substr(i, 2), 16));
         }
-        let seed = decryptionSeed;
+        let stream = buildKeyStream(xorBytes.length);
         let json = '';
         for (let i = 0; i < xorBytes.length; i++) {
-            const key = (seed % 255) + 1;
-            seed = (seed * 1103515245 + 12345) >>> 0;
-            json += String.fromCharCode(xorBytes.charCodeAt(i) ^ key);
+            json += String.fromCharCode(xorBytes.charCodeAt(i) ^ stream[i]);
         }
         return JSON.parse(json);
     } catch (e) {
@@ -29,19 +43,10 @@ const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', clients: clients.size, blacklisted: blacklistedJobs.size }));
-    } else if (req.url === '/blacklist' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
-            try {
-                const data = JSON.parse(body);
-                if (data.jobId) {
-                    blacklistedJobs.add(data.jobId);
-                    res.end(JSON.stringify({ success: true }));
-                }
-            } catch(e) { res.end('error'); }
-        });
+        res.end(JSON.stringify({ status: 'ok', clients: clients.size }));
+    } else if (req.url === '/logs') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Check Render logs for scan data');
     } else {
         res.writeHead(426);
         res.end('WebSocket server');
@@ -52,18 +57,33 @@ const wss = new WebSocket.Server({ server });
 const clients = new Set();
 
 wss.on('connection', (ws) => {
+    console.log('[WS] Client connected');
     clients.add(ws);
+    
     ws.on('message', (data) => {
         const decrypted = decryptData(data.toString());
         if (decrypted) {
-            console.log(`\n[SCAN] ${decrypted.duelIcon || '💰'} ${decrypted.petName} | ${decrypted.moneyFormatted}/s | Duel:${decrypted.isDuel} | Job:${decrypted.jobId?.substring(0,12)}...`);
-            clients.forEach(client => {
-                if (client !== ws && client.readyState === WebSocket.OPEN) client.send(data);
-            });
+            // LOGS SHOW HERE IN RENDER (unencrypted)
+            console.log('\n═══════════════════════════════════════════════════');
+            console.log(`[SCAN] JobID: ${decrypted.jobid}`);
+            console.log(`[SCAN] Players: ${decrypted.players}`);
+            console.log(`[SCAN] Pet Name: ${decrypted.petName}`);
+            console.log(`[SCAN] Money/s: ${decrypted.moneyPerSecond}`);
+            console.log(`[SCAN] InDuel: ${decrypted.inDuel}`);
+            console.log(`[SCAN] Mutation: ${decrypted.mutation}`);
+            console.log(`[SCAN] Traits: ${decrypted.traits}`);
+            console.log('═══════════════════════════════════════════════════\n');
         }
     });
-    ws.on('close', () => clients.delete(ws));
-    ws.send(JSON.stringify({ type: 'welcome', timestamp: Date.now() }));
+    
+    ws.on('close', () => {
+        console.log('[WS] Client disconnected');
+        clients.delete(ws);
+    });
 });
 
-server.listen(PORT, () => console.log(`Server on port ${PORT}`));
+server.listen(PORT, () => {
+    console.log(`[SERVER] Running on port ${PORT}`);
+    console.log(`[SERVER] WebSocket: wss://vexisfinder13.onrender.com`);
+    console.log('[SERVER] Waiting for scanner data...\n');
+});
